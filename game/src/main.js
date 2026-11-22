@@ -284,6 +284,7 @@ function spawnParticles(x, y, color, count = 18) {
   }
 }
 
+// Renders active particles as fading circles.
 function drawParticles() {
   for (const p of particles) {
     const alpha = Math.max(0, Math.min(1, p.life / p.max));

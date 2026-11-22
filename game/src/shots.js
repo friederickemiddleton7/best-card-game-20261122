@@ -91,7 +91,6 @@ export async function stageShot(name, seed) {
 
   if (name === 'loss') {
     let game = beginPlay(random);
-    // quick loss: make player life 0
     game.player.life = 0;
     game.phase = 'loss';
     game.winner = 'ai';

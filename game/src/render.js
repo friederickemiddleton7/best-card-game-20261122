@@ -15,6 +15,7 @@ export function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+// Draws a suit emblem; exported for cross-module use (main/shots/screens).
 export function drawSuitIcon(ctx, suit, x, y, size) {
   const def = SUITS[suit];
   ctx.fillStyle = def.color;
