@@ -1,141 +1,313 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
+// Canvas rendering for Tidebound Duel. All drawing lives here.
+import {
+  FIELD, CARD_W, CARD_H, CARD_W_SM, CARD_H_SM, SUITS, SUIT_RULES, SUIT_ORDER,
+  PALETTE, FONT, ENERGY_CAP, BOARD_SLOTS, LIFE_CAP,
+} from './config.js';
+import { cardPower, tideStrength } from './rules.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
-
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
-
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
-    }
-    return text;
-  };
+export function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
+export function drawSuitIcon(ctx, suit, x, y, size) {
+  const def = SUITS[suit];
+  ctx.fillStyle = def.color;
+  ctx.strokeStyle = def.edge;
+  ctx.lineWidth = Math.max(1.5, size * 0.12);
+  ctx.beginPath();
+  const s = size * 0.45;
+  if (def.shape === 'triangle') {
+    ctx.moveTo(x, y - s);
+    ctx.lineTo(x + s, y + s * 0.75);
+    ctx.lineTo(x - s, y + s * 0.75);
+    ctx.closePath();
+  } else if (def.shape === 'circle') {
+    ctx.arc(x, y, s * 0.85, 0, Math.PI * 2);
+  } else if (def.shape === 'square') {
+    ctx.rect(x - s * 0.75, y - s * 0.75, s * 1.5, s * 1.5);
+  } else if (def.shape === 'diamond') {
+    ctx.moveTo(x, y - s);
+    ctx.lineTo(x + s * 0.8, y);
+    ctx.lineTo(x, y + s);
+    ctx.lineTo(x - s * 0.8, y);
+    ctx.closePath();
+  }
+  ctx.fill();
+  ctx.stroke();
+}
 
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
+export function fitCardText(ctx, text, maxWidth, baseSize) {
+  let size = baseSize;
+  ctx.font = `600 ${size}px ${FONT}`;
+  while (size > 8 && ctx.measureText(text).width > maxWidth) {
+    size -= 1;
+    ctx.font = `600 ${size}px ${FONT}`;
+  }
+  return size;
+}
+
+export function drawCardFace(ctx, card, x, y, w, h, opts = {}) {
+  const { selected = false, hover = false, dim = false, showPower = null, faceDown = false, alpha = 1 } = opts;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const suit = SUITS[card.suit];
+  const r = 10;
+  if (faceDown) {
+    roundRect(ctx, x, y, w, h, r);
+    ctx.fillStyle = PALETTE.cardBack;
+    ctx.fill();
+    ctx.strokeStyle = PALETTE.cardBackEdge;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(110,203,255,0.25)';
+    ctx.lineWidth = 1;
+    for (let i = 10; i < w - 6; i += 10) {
+      ctx.beginPath(); ctx.moveTo(x + i, y + 6); ctx.lineTo(x + i, y + h - 6); ctx.stroke();
+    }
+    drawSuitIcon(ctx, 'gale', x + w / 2, y + h / 2, 26);
+    ctx.restore();
+    return;
   }
 
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
+  roundRect(ctx, x, y, w, h, r);
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, PALETTE.cardFace);
+  grad.addColorStop(1, PALETTE.cardFace2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = selected ? '#ffffff' : hover ? suit.edge : suit.color;
+  ctx.lineWidth = selected ? 3 : hover ? 2.5 : 2;
+  ctx.stroke();
+
+  if (selected || hover) {
+    ctx.shadowColor = suit.glow;
+    ctx.shadowBlur = selected ? 18 : 10;
+    ctx.strokeStyle = selected ? '#ffffff' : suit.edge;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
   }
 
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
+  // cost badge
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  roundRect(ctx, x + 5, y + 5, 24, 24, 6);
+  ctx.fill();
+  ctx.fillStyle = PALETTE.gold;
+  ctx.font = `700 16px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(card.cost), x + 17, y + 17);
 
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
-      }
-    }
+  // suit icon
+  drawSuitIcon(ctx, card.suit, x + w - 16, y + 17, 18);
 
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
+  // name
+  ctx.fillStyle = dim ? PALETTE.muted : PALETTE.text;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const nameSize = fitCardText(ctx, card.name, w - 14, 12);
+  ctx.font = `600 ${nameSize}px ${FONT}`;
+  ctx.fillText(card.name, x + w / 2, y + 34);
+
+  // art area
+  const artY = y + 52;
+  const artH = h - 82;
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  roundRect(ctx, x + 7, artY, w - 14, artH, 6);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // big suit emblem
+  ctx.globalAlpha = alpha * 0.18;
+  drawSuitIcon(ctx, card.suit, x + w / 2, artY + artH / 2, Math.min(w, artH) * 0.55);
+  ctx.globalAlpha = alpha;
+  drawSuitIcon(ctx, card.suit, x + w / 2, artY + artH / 2, 24);
+
+  // power badge
+  const pwr = showPower !== null ? showPower : card.power;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  roundRect(ctx, x + w / 2 - 22, y + h - 30, 44, 24, 6);
+  ctx.fill();
+  ctx.strokeStyle = suit.color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = pwr > card.power ? PALETTE.green : (pwr < card.power ? PALETTE.red : PALETTE.text);
+  ctx.font = `700 18px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(pwr), x + w / 2, y + h - 18);
+
+  // suit label
+  ctx.fillStyle = PALETTE.muted;
+  ctx.font = `500 9px ${FONT}`;
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(suit.name.toUpperCase(), x + w / 2, y + h - 32);
+
+  ctx.restore();
+}
+
+export function drawBackground(ctx) {
+  const w = FIELD.width, h = FIELD.height;
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, PALETTE.skyTop);
+  g.addColorStop(0.55, PALETTE.skyBottom);
+  g.addColorStop(1, '#071827');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+
+  // moon
+  ctx.save();
+  ctx.fillStyle = PALETTE.moonGlow;
+  ctx.beginPath(); ctx.arc(1040, 95, 90, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = PALETTE.moon;
+  ctx.beginPath(); ctx.arc(1040, 95, 42, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = PALETTE.skyTop;
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath(); ctx.arc(1055, 85, 36, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // stars
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  const stars = [[80,40],[160,90],[260,30],[380,70],[520,35],[640,60],[760,25],[900,55],[1150,45],[1220,80],[300,110],[700,100]];
+  for (const [sx, sy] of stars) { ctx.fillRect(sx, sy, 2, 2); }
+
+  // sea
+  ctx.fillStyle = PALETTE.sea;
+  ctx.fillRect(0, 420, w, 180);
+  for (let i = 0; i < 5; i++) {
+    ctx.strokeStyle = `rgba(110,203,255,${0.08 - i * 0.012})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const yy = 450 + i * 28;
+    for (let x = 0; x <= w; x += 20) {
+      const dy = Math.sin((x + i * 70) * 0.012) * 6;
+      if (x === 0) ctx.moveTo(x, yy + dy); else ctx.lineTo(x, yy + dy);
     }
+    ctx.stroke();
   }
 
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
-    }
+  // shore
+  ctx.fillStyle = PALETTE.shore;
+  ctx.beginPath();
+  ctx.moveTo(0, 560);
+  ctx.quadraticCurveTo(320, 540, 640, 555);
+  ctx.quadraticCurveTo(960, 570, 1280, 545);
+  ctx.lineTo(1280, 720); ctx.lineTo(0, 720); ctx.closePath();
+  ctx.fill();
+}
+
+export function drawPanel(ctx, x, y, w, h, alpha = 0.86) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  roundRect(ctx, x, y, w, h, 12);
+  ctx.fillStyle = PALETTE.panel;
+  ctx.fill();
+  ctx.strokeStyle = PALETTE.panelEdge;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawButton(ctx, rect, label, opts = {}) {
+  const { hover = false, enabled = true, fontSize = 20 } = opts;
+  ctx.save();
+  roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 10);
+  ctx.fillStyle = !enabled ? '#243447' : hover ? PALETTE.buttonHover : PALETTE.button;
+  ctx.fill();
+  ctx.strokeStyle = !enabled ? '#446' : PALETTE.buttonEdge;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = enabled ? PALETTE.text : PALETTE.dim;
+  ctx.font = `700 ${fontSize}px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  ctx.restore();
+}
+
+export function drawLifeBar(ctx, x, y, w, h, life, max, alignRight = false) {
+  ctx.save();
+  roundRect(ctx, x, y, w, h, 6);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fill();
+  const ratio = Math.max(0, Math.min(1, life / max));
+  const fillW = w * ratio;
+  const fx = alignRight ? x + w - fillW : x;
+  roundRect(ctx, fx, y, fillW, h, 6);
+  ctx.fillStyle = ratio > 0.5 ? PALETTE.green : ratio > 0.25 ? PALETTE.gold : PALETTE.red;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, h, 6);
+  ctx.stroke();
+  ctx.fillStyle = PALETTE.text;
+  ctx.font = `700 16px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${life}/${max}`, x + w / 2, y + h / 2 + 0.5);
+  ctx.restore();
+}
+
+export function drawEnergyPips(ctx, x, y, current, max, total = ENERGY_CAP) {
+  for (let i = 0; i < total; i++) {
+    const px = x + i * 22;
+    ctx.beginPath();
+    ctx.arc(px, y, 7, 0, Math.PI * 2);
+    if (i < current) ctx.fillStyle = PALETTE.gold;
+    else if (i < max) ctx.fillStyle = 'rgba(242,201,76,0.25)';
+    else ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fill();
+    ctx.strokeStyle = i < max ? 'rgba(242,201,76,0.7)' : 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
+}
 
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
-    }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+export function getHandLayout(count, y, w = CARD_W, h = CARD_H) {
+  const cards = [];
+  const spacing = Math.min(w + 10, (900 - w) / Math.max(1, count - 1));
+  const totalW = w + spacing * (count - 1);
+  const startX = (FIELD.width - totalW) / 2;
+  for (let i = 0; i < count; i++) {
+    const x = startX + i * spacing;
+    const mid = (count - 1) / 2;
+    const rot = (i - mid) * 0.03;
+    const lift = Math.abs(i - mid) * 2;
+    cards.push({ x, y: y + lift, rot, w, h });
   }
+  return cards;
+}
 
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
-    }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
-    }
+export function getBoardLayout(count, y) {
+  const slots = [];
+  const spacing = CARD_W_SM + 14;
+  const totalW = spacing * BOARD_SLOTS - 14;
+  const startX = (FIELD.width - totalW) / 2;
+  for (let i = 0; i < BOARD_SLOTS; i++) {
+    slots.push({ x: startX + i * spacing, y, w: CARD_W_SM, h: CARD_H_SM, occupied: i < count });
   }
+  return slots;
+}
 
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+export function hitTestCard(mx, my, layout) {
+  for (let i = layout.length - 1; i >= 0; i--) {
+    const c = layout[i];
+    if (mx >= c.x && mx <= c.x + c.w && my >= c.y && my <= c.y + c.h) return i;
+  }
+  return -1;
+}
+
+export function screenToCanvas(canvas, clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (FIELD.width / rect.width),
+    y: (clientY - rect.top) * (FIELD.height / rect.height),
+  };
 }

@@ -1,79 +1,103 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Deterministic screenshot scenes for Tidebound Duel.
+import { createRandom } from './random.js';
+import { beginPlay, playCard, passTurn, resolveEndOfTurn, startTurn, canPlay, cardPower, tideStrength } from './rules.js';
+import { chooseAiAction } from './ai.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
+function simulateTurn(game, random) {
+  // play one card for active player if possible, else pass
+  const who = game.active === 'player' ? game.player : game.ai;
+  const playable = who.hand.filter((c) => canPlay(game, who, c));
+  if (playable.length > 0) {
+    // pick highest power affordable, with slight preference
+    playable.sort((a, b) => (b.power + b.cost) - (a.power + a.cost));
+    const pick = playable[0];
+    playCard(game, who, pick);
+  } else {
+    // pass - no card played
   }
-  return Infinity;
+  if (game.phase !== 'play') return;
+  resolveEndOfTurn(game);
+  if (game.phase !== 'play') return;
+  game.active = game.active === 'player' ? 'ai' : 'player';
+  startTurn(game);
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
+function fastForward(game, random, turns) {
+  for (let i = 0; i < turns && game.phase === 'play'; i++) {
+    simulateTurn(game, random);
   }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+export async function stageShot(name, seed) {
+  const random = createRandom(seed || 1);
+  if (name === 'start') {
+    // show title - no game state needed beyond screen
+    return { screen: 'title', game: null };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+
+  if (name === 'play') {
+    const game = beginPlay(random);
+    // play a few turns to get interesting board state
+    fastForward(game, random, 6);
+    // ensure it's player's turn with a playable hand for a nice midgame shot
+    if (game.phase === 'play' && game.active === 'ai') {
+      // do one ai turn to give back to player
+      simulateTurn(game, random);
+    }
+    // make sure player has energy and at least one playable card visible
+    if (game.phase === 'play') {
+      game.active = 'player';
+      if (game.player.energy < 2) game.player.energy = Math.min(game.player.maxEnergy || 3, 3);
+      if (game.player.maxEnergy < 3) game.player.maxEnergy = 3;
+    }
+    return { screen: 'play', game };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+
+  if (name === 'win' || name === 'end') {
+    // force a win: simulate until player wins, or construct one
+    let game = beginPlay(random);
+    // try natural playthrough first
+    for (let i = 0; i < 80 && game.phase === 'play'; i++) {
+      simulateTurn(game, random);
+    }
+    if (game.phase !== 'win') {
+      // construct a clear win state
+      game = beginPlay(random);
+      fastForward(game, random, 4);
+      game.ai.life = 3;
+      game.player.life = 18;
+      // give player strong board
+      while (game.player.board.length < 3) {
+        const c = game.player.hand.find((x) => canPlay(game, game.player, x)) || game.player.deck[0];
+        if (!c) break;
+        if (!game.player.hand.includes(c)) { game.player.hand.push(c); }
+        game.player.energy = Math.max(game.player.energy, c.cost);
+        playCard(game, game.player, c);
+        if (game.phase !== 'play') break;
+      }
+      // ensure ai has weak board
+      game.ai.board = game.ai.board.slice(0, 1);
+      if (game.phase === 'play') {
+        resolveEndOfTurn(game);
+      }
+      if (game.phase === 'play') {
+        game.ai.life = 0;
+        game.phase = 'win';
+        game.winner = 'player';
+      }
+    }
+    return { screen: 'win', game };
+  }
+
+  if (name === 'loss') {
+    let game = beginPlay(random);
+    // quick loss: make player life 0
+    game.player.life = 0;
+    game.phase = 'loss';
+    game.winner = 'ai';
+    return { screen: 'loss', game };
+  }
+
+  // default fallback
+  return { screen: 'title', game: null };
 }
